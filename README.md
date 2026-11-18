@@ -44,7 +44,7 @@ uv run diffguard review --diff tests/fixtures/sample.patch --title "feat: 按 ui
 进程退出码为 `2`。跑单测：
 
 ```powershell
-uv run pytest        # 28 passed
+uv run pytest        # 33 passed
 ```
 
 也可以起 HTTP 服务：
@@ -98,23 +98,116 @@ JSON 输出字段：`verdict`（`pass` / `comment` / `block`）、`issues`、`st
 
 服务启动时编译一次图，后续请求只新建状态。超过 `service.max_concurrent_reviews` 的请求排队等待；单次审查超过 `budget.task_timeout_seconds` 返回 `504`。
 
-## 架构
+## MCP 工具服务
 
-```text
-parse_diff → static_scan → supervisor ─┬→ security_agent ─┐
-                                       ├→ style_agent    ─┼→ aggregate → 报告
-                                       └→ perf_agent     ─┘
+工具层可以独立作为 MCP Server 启动，供 Claude Desktop、其他 Agent 或脚本复用。内部图仍然直接调用同一批函数，两条路径的结果完全一致。
+
+```powershell
+uv run diffguard-mcp                      # stdio，供本地客户端
+uv run diffguard-mcp --http --port 8124   # streamable HTTP
 ```
 
-| 层 | 职责 | 状态写入 |
-| --- | --- | --- |
-| 编排层 | 解析 diff、规则初筛、派发三个专家 | 覆盖写 `files`、`candidates`、`dispatch` |
-| 专家层 | 三个 Agent 并行审查，只返回增量 | 追加写 `issues`、`expert_results` |
-| 汇总层 | 去重、定级、算结论 | 唯一写 `final_issues`、`final_verdict`、`stats` |
+| Tool | 说明 |
+| --- | --- |
+| `parse_diff` | 解析 unified diff，返回文件、hunk 与行号映射 |
+| `scan_rules` | 跑内置正则规则，默认只返回新增行命中 |
+| `scan_complexity` | 按圈复杂度阈值扫描改动触及的函数 |
+| `scan_blocking_io` | 找出异步函数中的同步阻塞调用 |
 
-三个专家拿的是同一份状态快照，归并发生在 superstep 屏障之后，因此并行执行不会互相覆盖。静态候选只影响各专家看到的上下文排序，不决定谁被执行：三路始终全量派发。
+客户端接入（以 Claude Desktop 为例）：
 
-入口是 async 的：三个专家作为 asyncio 任务并发，等模型返回时不占线程；解析与静态扫描是 CPU 型工作，交给 `asyncio.to_thread`。
+```json
+{
+  "mcpServers": {
+    "diffguard": {
+      "command": "uv",
+      "args": ["--directory", "f:/DIffGuard", "run", "diffguard-mcp"]
+    }
+  }
+}
+```
+
+按方案的分工表，只有依赖重、需要跨 Agent 复用的工具对外暴露；脱敏与编排逻辑留在进程内。
+
+## 整体流程
+
+```text
+CLI / HTTP
+    │
+    ▼
+parse_diff ──→ static_scan ──→ supervisor
+                                  │
+                ┌─────────────────┼─────────────────┐
+                ▼                 ▼                 ▼
+         security_agent     style_agent       perf_agent     （并行）
+                └─────────────────┼─────────────────┘
+                                  ▼  屏障：全部分支完成
+                              aggregate
+                                  │
+                                  ▼
+                     Markdown / JSON / 退出码
+```
+
+| 阶段 | 节点 | 做什么 | 写入状态 |
+| --- | --- | --- | --- |
+| 1 解析 | `parse_diff` | unified diff → 文件、hunk、新增行号映射 | `files` |
+| 2 初筛 | `static_scan` | 14 条规则 + AST 扫描，零模型成本 | `candidates`、`issues` |
+| 3 派发 | `supervisor` | 决定派发名单（当前恒为三路） | `dispatch` |
+| 4 复核 | 三个专家并行 | 排序、裁剪、脱敏后交给模型，产出问题 + 建议 | `issues`、`expert_results` |
+| 5 屏障 | — | 等全部分支完成，按 reducer 归并 | — |
+| 6 汇总 | `aggregate` | 去重、排序、定级、统计 | `final_issues`、`final_verdict`、`stats` |
+| 7 输出 | `report` | Markdown 或 JSON；退出码 0 放行、2 阻断、1 错误 | — |
+
+异步边界：专家节点是 `async def`，等模型返回时不占线程；`parse_diff` 与静态扫描是 CPU 型工作，放在 `asyncio.to_thread` 里；`aggregate` 是纯计算，保持同步。
+
+三个专家拿的是同一份状态快照，静态候选只影响各自看到的上下文排序，不决定谁被执行：三路始终全量派发。归并发生在 superstep 屏障之后，并行不会互相覆盖。
+
+## Agent 职责
+
+| Agent | 模型 | 负责 | 明确不报 |
+| --- | --- | --- | --- |
+| `security_agent` | `qwen3.7-max` | SQL / 命令 / 模板注入、反序列化、硬编码凭据、`eval`/`exec`/`shell=True`、路径穿越、弱哈希 | 越权与权限模型（单文件 diff 判不了）、命名与格式 |
+| `style_agent` | `qwen3.8-flash` | 命名与既有约定冲突、重复逻辑、异常处理缺失（裸 except / 静默吞）、圈复杂度过高、注释与实现不符 | 个人偏好（引号、空行、行宽）、架构选型、性能 |
+| `perf_agent` | `qwen3.7-plus` | 循环内查询（N+1）、无界查询、重复 IO、热路径重计算、异步上下文中的同步阻塞 | 没有量级或 IO 次数证据的猜测 |
+
+三个专家都只输出问题与文字建议，不下结论；`style` 与 `perf` 的提示词禁用 P0/P1，因此这两个维度不会导致阻断。系统提示在 [prompts/](file:///f:/DIffGuard/src/diffguard/prompts)。
+
+## 状态字段
+
+全局状态只有一份 `PRReviewState`，字段与写入方式如下（定义见 [state.py](file:///f:/DIffGuard/src/diffguard/state.py)）：
+
+| 分组 | 字段 | 类型 | 写入方式 | 写入者 |
+| --- | --- | --- | --- | --- |
+| 输入 | `pr_title`、`diff` | `str` | 只读 | 入口一次性写入 |
+| 输入 | `files` | `list[FileDiff]` | 覆盖写一次 | `parse_diff` |
+| 候选 | `candidates` | `list[Issue]` | 覆盖写一次 | `static_scan` |
+| 控制 | `dispatch` | `list[str]` | 覆盖写一次 | `supervisor` |
+| 控制 | `steps` | `int` | 追加（`operator.add`，每次 +1） | 所有节点 |
+| 结论 | `issues` | `list[Issue]` | 追加（`operator.add`） | `static_scan` + 三个专家 |
+| 结论 | `expert_results` | `list[ExpertResult]` | 追加（`operator.add`） | 三个专家 |
+| 结论 | `final_issues` | `list[Issue]` | 覆盖写一次 | **仅** `aggregate` |
+| 结论 | `final_verdict` | `str` | 覆盖写一次 | **仅** `aggregate` |
+| 轨迹 | `trace` | `list[TraceEvent]` | 追加（`operator.add`） | 所有节点 |
+| 出口 | `stats` | `dict[str, int]` | 覆盖写一次 | **仅** `aggregate` |
+
+两条不变式：
+
+- 带 reducer 的字段只能追加，不能替换。所以汇总结论放在 `final_*`，而不是覆写 `issues`。
+- 无 reducer 的字段只有一个写入者；两个节点同时写会报并发写冲突。
+
+## 工具清单
+
+全部实现为同步 Python 函数。其中 4 个按方案分工表通过 MCP Server 对外暴露，图内部直接 import 调用，不经过 MCP。
+
+| 工具 | 形式 | 实现 | 使用位置 | MCP |
+| --- | --- | --- | --- | --- |
+| diff 解析 | 纯函数（CPU 型，经 `to_thread`） | `tools/diff.py` | `parse_diff` 节点、MCP | `parse_diff` |
+| 规则引擎 | 纯函数（正则） | `tools/rules.py` | `static_scan` 节点、MCP | `scan_rules` |
+| 圈复杂度 | 纯函数（`ast` 模块） | `tools/ast_scan.py` | `static_scan` 节点、MCP | `scan_complexity` |
+| 阻塞 IO 检测 | 纯函数（`ast` 模块） | `tools/ast_scan.py` | `static_scan` 节点、MCP | `scan_blocking_io` |
+| 脱敏 | 纯函数 | `tools/redact.py` | 送审上下文、证据输出 | 否 |
+| 上下文装配 | 节点内逻辑 | `nodes/experts.py` | 三个专家 | 否 |
+| 模型调用 | `ChatOpenAI` + 结构化输出 | `nodes/experts.py` | 三个专家 | 否 |
 
 ## 去重与归并
 
@@ -176,14 +269,21 @@ parse_diff → static_scan → supervisor ─┬→ security_agent ─┐
 
 ```text
 src/diffguard/
+  cli.py            命令行入口（review 子命令、退出码）
   app.py            FastAPI 服务层（/health、/review）
-  graph.py          图编排与 review() 入口
-  state.py          状态契约与 reducer
-  schemas.py        Issue / Verdict / 报告数据结构
-  nodes/            pipeline、experts、aggregate
-  tools/            diff 解析、规则库、AST 扫描、脱敏
-  prompts/          三份专家系统提示
-config/models.yaml  模型 ID、预算、阈值
+  mcp_server.py     MCP 工具服务（4 个 tool）
+  graph.py          图编排：build_graph()、run_graph()、review()
+  state.py          全局状态契约与 reducer
+  schemas.py        Issue / ExpertResult / Verdict / TraceEvent
+  config.py         YAML + 环境变量配置
+  models.py         模型构建与无密钥降级
+  report.py         decide_verdict()、render_markdown()
+  nodes/pipeline.py     解析、初筛、派发
+  nodes/experts.py      三个专家 Agent
+  nodes/aggregate.py    去重、定级、统计
+  tools/                diff 解析、规则库、AST 扫描、脱敏
+  prompts/              三份专家系统提示
+config/models.yaml  模型 ID、三层预算、阈值
 tests/              单测与 fixture
 ```
 
