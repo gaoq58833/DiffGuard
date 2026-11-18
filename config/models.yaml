@@ -1,0 +1,47 @@
+# 模型与运行参数。所有取值都可通过同名环境变量覆盖，详见 src/diffguard/config.py。
+# 模型 ID 以阿里云百炼“文本生成模型”页为准；此处为 2026-11 核对结果。
+provider:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: DASHSCOPE_API_KEY
+
+models:
+  supervisor:
+    name: qwen3.7-max
+    temperature: 0.0
+    max_tokens: 1024
+  security:
+    name: qwen3.7-max
+    temperature: 0.0
+    max_tokens: 2048
+  style:
+    name: qwen3.8-flash
+    temperature: 0.0
+    max_tokens: 2048
+  perf:
+    name: qwen3.7-plus
+    temperature: 0.0
+    max_tokens: 2048
+  # M1 汇总为确定性规则，不调模型；保留配置位以便 M3 接入 judge
+  aggregate:
+    name: qwen3.7-max
+    temperature: 0.0
+    max_tokens: 2048
+
+# 三层预算，避免“单 PR 8K”和“单任务 50K”两种口径打架
+budget:
+  per_agent_context_tokens: 8000     # 单个专家 Agent 的上下文上限（超出即裁剪代码块）
+  per_pr_token_budget: 50000         # 整个审查任务的上限，超限降级为仅规则审查
+  task_timeout_seconds: 300
+
+service:
+  max_concurrent_reviews: 4          # 服务层同时在跑的审查任务数；每个任务最多 3 次并发模型调用
+
+limits:
+  max_reflection_iterations: 1       # M1 不做自我复核，M3 再放开到 3
+  max_tool_calls_per_task: 10
+  max_same_tool_retries: 2
+
+rules:
+  hunk_context_lines: 20             # AST 分析需要的 hunk 上下文行
+  complexity_threshold: 10           # 圈复杂度阈值
+  target_line_only: true             # 仅对新增行报问题
