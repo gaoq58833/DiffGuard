@@ -1,9 +1,10 @@
 """报告输出模块：结论判定与评论体渲染。
 
 等级到结论的映射保持确定性，不交给模型判断：
-- 存在 P0/P1 -> 阻断
-- 仅有 P2     -> 评论
-- 只有 P3     -> 放行（P3 只作为附注展示，不影响合并）
+- 存在 P0            -> 阻断（不设阈值，一条就拦）
+- P1 达到阈值        -> 阻断
+- P1 低于阈值 / 有 P2 -> 评论
+- 只有 P3            -> 放行（P3 只作为附注展示，不影响合并）
 这样干净代码不会因为一条风格 nit 被判成"评论"，结论一致率才稳得住。
 """
 
@@ -12,10 +13,14 @@ from __future__ import annotations
 from .schemas import Issue, ReviewReport, Severity, Verdict
 
 
-def decide_verdict(issues: list[Issue]) -> Verdict:
-    if any(i.severity in (Severity.P0, Severity.P1) for i in issues):
+def decide_verdict(issues: list[Issue], *, p1_block_threshold: int = 1) -> Verdict:
+    """P0 一条即阻断；P1 累计达到 p1_block_threshold 才阻断，否则降为评论。"""
+    if any(i.severity is Severity.P0 for i in issues):
         return Verdict.BLOCK
-    if any(i.severity is Severity.P2 for i in issues):
+    p1_count = sum(1 for i in issues if i.severity is Severity.P1)
+    if p1_count >= p1_block_threshold:
+        return Verdict.BLOCK
+    if p1_count or any(i.severity is Severity.P2 for i in issues):
         return Verdict.COMMENT
     return Verdict.PASS
 
@@ -30,6 +35,10 @@ def render_markdown(report: ReviewReport, pr_title: str = "") -> str:
         lines.append(f"**PR**：{_cell(pr_title)}  ")
     lines.append(f"**结论**：{report.verdict.label} ({report.verdict.value.upper()})")
     lines.append("")
+
+    if report.summary:
+        lines.append(report.summary)
+        lines.append("")
 
     stats = report.stats
     if stats:

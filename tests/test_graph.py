@@ -42,6 +42,21 @@ def test_verdict_passes_when_only_nits():
     assert decide_verdict([_issue("A", 1, Severity.P3)]) is Verdict.PASS
 
 
+def test_verdict_p0_always_blocks_regardless_of_threshold():
+    issues = [_issue("A", 1, Severity.P0)]
+    assert decide_verdict(issues, p1_block_threshold=99) is Verdict.BLOCK
+
+
+def test_verdict_p1_below_threshold_degrades_to_comment():
+    issues = [_issue("A", 1, Severity.P1)]
+    assert decide_verdict(issues, p1_block_threshold=2) is Verdict.COMMENT
+
+
+def test_verdict_p1_at_threshold_blocks():
+    issues = [_issue("A", 1, Severity.P1), _issue("B", 2, Severity.P1)]
+    assert decide_verdict(issues, p1_block_threshold=2) is Verdict.BLOCK
+
+
 def test_dedupe_prefers_rule_hit_on_same_key():
     issues = [
         _issue("SEC_SQL_INJECTION", 4, Severity.P0, confidence=0.5),

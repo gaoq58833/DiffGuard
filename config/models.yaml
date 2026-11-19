@@ -21,7 +21,7 @@ models:
     name: qwen3.7-plus
     temperature: 0.0
     max_tokens: 2048
-  # M1 汇总为确定性规则，不调模型；保留配置位以便 M3 接入 judge
+  # 汇总节点用模型生成用户评论；verdict 仍由代码计算
   aggregate:
     name: qwen3.7-max
     temperature: 0.0
@@ -45,3 +45,6 @@ rules:
   hunk_context_lines: 20             # AST 分析需要的 hunk 上下文行
   complexity_threshold: 10           # 圈复杂度阈值
   target_line_only: true             # 仅对新增行报问题
+
+verdict:
+  p1_block_threshold: 1              # P1 累计达到该数量才阻断，否则降为评论；P0 始终一条即阻断

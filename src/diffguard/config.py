@@ -57,6 +57,10 @@ class RuleConfig(BaseModel):
     target_line_only: bool = True
 
 
+class VerdictConfig(BaseModel):
+    p1_block_threshold: int = 1  # P1 达到该数量才阻断；P0 始终一条即阻断
+
+
 class Settings(BaseModel):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     models: dict[str, ModelConfig]
@@ -64,6 +68,7 @@ class Settings(BaseModel):
     service: ServiceConfig = Field(default_factory=ServiceConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     rules: RuleConfig = Field(default_factory=RuleConfig)
+    verdict: VerdictConfig = Field(default_factory=VerdictConfig)
 
     def model(self, agent: str) -> ModelConfig:
         return self.models[agent]

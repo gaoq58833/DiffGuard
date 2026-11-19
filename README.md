@@ -15,7 +15,7 @@ DiffGuard 把这三件事拆开：规则做零成本初筛，三个专家 Agent 
 - **规则前置**：14 条内置规则（安全 6 / 性能 3 / 规范 5），不调模型也能出结论。
 - **三专家并行**：安全 / 规范 / 性能独立上下文，互不污染。
 - **全链路异步**：模型调用用 `await`，等待期间不占线程；CPU 型解析走线程池。
-- **确定性结论**：P0、P1 阻断，P2 评论，仅 P3 放行，同一份 diff 结果可复现。
+- **确定性结论**：P0 一条即阻断，P1 累计达到 `verdict.p1_block_threshold` 阻断（低于阈值降为评论），P2 评论，仅 P3 放行，同一份 diff 结果可复现。
 - **送审脱敏**：密钥类命中在发给模型前替换为 `<REDACTED>`。
 - **无 key 降级**：未配置密钥时只跑规则，流程不中断。
 - **HTTP 服务**：与 CLI 共用同一内核，FastAPI 暴露 `/review`，图在启动时编译一次。
@@ -44,7 +44,7 @@ uv run diffguard review --diff tests/fixtures/sample.patch --title "feat: 按 ui
 进程退出码为 `2`。跑单测：
 
 ```powershell
-uv run pytest        # 33 passed
+uv run pytest        # 36 passed
 ```
 
 也可以起 HTTP 服务：
@@ -79,7 +79,7 @@ git diff origin/main...HEAD | uv run diffguard review --diff -
 
 退出码：`0` 放行或评论，`2` 阻断。CI 里不需要额外解析输出。
 
-JSON 输出字段：`verdict`（`pass` / `comment` / `block`）、`issues`、`stats`、`trace`。
+JSON 输出字段：`verdict`（`pass` / `comment` / `block`）、`issues`、`stats`、`trace`、`summary`（汇总 Agent 生成的用户评论）。
 
 ## HTTP 服务
 
@@ -155,10 +155,10 @@ parse_diff ──→ static_scan ──→ supervisor
 | 3 派发 | `supervisor` | 决定派发名单（当前恒为三路） | `dispatch` |
 | 4 复核 | 三个专家并行 | 排序、裁剪、脱敏后交给模型，产出问题 + 建议 | `issues`、`expert_results` |
 | 5 屏障 | — | 等全部分支完成，按 reducer 归并 | — |
-| 6 汇总 | `aggregate` | 去重、排序、定级、统计 | `final_issues`、`final_verdict`、`stats` |
+| 6 汇总 | `aggregate` | 去重、排序、定级、统计，并生成用户评论 | `final_issues`、`final_verdict`、`stats`、`summary` |
 | 7 输出 | `report` | Markdown 或 JSON；退出码 0 放行、2 阻断、1 错误 | — |
 
-异步边界：专家节点是 `async def`，等模型返回时不占线程；`parse_diff` 与静态扫描是 CPU 型工作，放在 `asyncio.to_thread` 里；`aggregate` 是纯计算，保持同步。
+异步边界：专家节点是 `async def`，等模型返回时不占线程；`parse_diff` 与静态扫描是 CPU 型工作，放在 `asyncio.to_thread` 里；`aggregate` 也为异步节点——`verdict` 由代码计算，评论文字调用模型生成，模型不可用时降级为代码摘要。
 
 三个专家拿的是同一份状态快照，静态候选只影响各自看到的上下文排序，不决定谁被执行：三路始终全量派发。归并发生在 superstep 屏障之后，并行不会互相覆盖。
 
@@ -189,6 +189,7 @@ parse_diff ──→ static_scan ──→ supervisor
 | 结论 | `final_verdict` | `str` | 覆盖写一次 | **仅** `aggregate` |
 | 轨迹 | `trace` | `list[TraceEvent]` | 追加（`operator.add`） | 所有节点 |
 | 出口 | `stats` | `dict[str, int]` | 覆盖写一次 | **仅** `aggregate` |
+| 出口 | `summary` | `str` | 覆盖写一次 | **仅** `aggregate` |
 
 两条不变式：
 
@@ -280,9 +281,9 @@ src/diffguard/
   report.py         decide_verdict()、render_markdown()
   nodes/pipeline.py     解析、初筛、派发
   nodes/experts.py      三个专家 Agent
-  nodes/aggregate.py    去重、定级、统计
+  nodes/aggregate.py    去重、定级、统计、生成用户评论
   tools/                diff 解析、规则库、AST 扫描、脱敏
-  prompts/              三份专家系统提示
+  prompts/              三份专家系统提示 + 汇总评论提示（aggregate.md）
 config/models.yaml  模型 ID、三层预算、阈值
 tests/              单测与 fixture
 ```
@@ -310,7 +311,7 @@ tests/              单测与 fixture
 ## 限制
 
 - M1 只做单轮审查，不做跨文件数据流分析。
-- 汇总是确定性规则，尚未接入模型 judge。
+- `verdict` 始终是确定性代码计算；用户评论（`summary`）由模型生成，模型失败时降级为代码摘要，不影响结论。
 - 专家对静态候选的「否定」不会移除该条命中：候选在 `static_scan` 阶段已写入 `issues`。
 - 去重依赖模型主动填写 `related_rule_id`；漏填时同一问题会重复上报（多报，不漏报）。
 - 服务层只有并发限流，没有鉴权，只应监听内网或置于反向代理之后。

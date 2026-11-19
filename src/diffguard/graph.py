@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .config import Settings, load_settings
 from .models import ModelFactory
-from .nodes.aggregate import aggregate_node
+from .nodes.aggregate import make_aggregate
 from .nodes.experts import make_expert_node
 from .nodes.pipeline import make_static_scan, parse_diff_node, route_experts, supervisor_node
 from .schemas import ReviewReport, Verdict
@@ -36,7 +36,7 @@ def build_graph(settings: Settings, *, use_llm: bool = True, checkpointer=None):
     graph.add_node("supervisor", supervisor_node)
     for agent in EXPERT_AGENTS:
         graph.add_node(f"{agent}_agent", make_expert_node(agent, settings, factory))
-    graph.add_node("aggregate", aggregate_node)
+    graph.add_node("aggregate", make_aggregate(settings, factory))
 
     graph.add_edge(START, "parse_diff")
     graph.add_edge("parse_diff", "static_scan")
@@ -82,6 +82,7 @@ async def run_graph(
         issues=state.get("final_issues", []),
         stats=state.get("stats", {}),
         trace=state.get("trace", []),
+        summary=state.get("summary", ""),
     )
 
 

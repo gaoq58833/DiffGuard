@@ -96,3 +96,4 @@ class ReviewReport(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
     stats: dict[str, int] = Field(default_factory=dict)
     trace: list[TraceEvent] = Field(default_factory=list)
+    summary: str = ""  # 汇总 Agent 生成的用户评论

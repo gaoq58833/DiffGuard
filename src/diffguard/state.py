@@ -39,3 +39,4 @@ class PRReviewState(TypedDict, total=False):
 
     # 出口：仅汇总节点写入
     stats: dict[str, int]
+    summary: str  # 汇总 Agent 生成的用户评论；verdict 仍由代码计算
