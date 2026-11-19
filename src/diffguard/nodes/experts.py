@@ -41,10 +41,8 @@ _MAX_LINES_PER_FILE = 200
 class ExpertFinding(BaseModel):
     """模型侧输出。字段固定，规则打分器可直接读取。"""
 
-    rule_id: str = Field(description="规则标识；命不中已有规则时用 <类别>_LLM_FINDING")
-    related_rule_id: str | None = Field(
-        default=None,
-        description="若本条描述的就是静态候选中的某一条，填该候选的 rule_id；否则留空",
+    rule_id: str = Field(
+        description="规则标识；只能复用候选清单中出现过的标识，否则用 <类别>_LLM_FINDING"
     )
     file: str
     line: int
@@ -113,27 +111,18 @@ _CATEGORY_PREFIX = {"security": "SEC", "style": "STY", "perf": "PERF"}
 
 
 def _resolve_rule_id(finding: ExpertFinding, category: str, candidates: list[Issue]) -> str:
-    """模型声明「我与某条候选是同一问题」时复用候选的 rule_id，让去重按同一键收敛。
+    """规则标识只能来自本次候选：已知规则名必须真的命中过，否则退回通用 ID。
 
-    只认同一文件、同一行的声明；对不上就退回通用 ID——宁可重复上报，
-    也不把两条不同的问题错并成一条。
+    去重完全依赖 (文件, 行号, 规则ID) 撞键，模型只负责把标识填对，
+    不参与任何合并判断。
     """
-    linked = (finding.related_rule_id or "").strip().upper()
-    if linked:
-        line = max(finding.line, 1)
-        for cand in candidates:
-            if cand.rule_id == linked and cand.file == finding.file and cand.start_line == line:
-                return linked
-    return _normalize_rule_id(finding.rule_id, category)
-
-
-def _normalize_rule_id(raw: str, category: str) -> str:
-    candidate = (raw or "").strip().upper()
-    if candidate in KNOWN_RULE_IDS:
-        return candidate
-    if _RULE_ID_RE.match(candidate):
-        return candidate
-    return f"{_CATEGORY_PREFIX.get(category, 'GEN')}_LLM_FINDING"
+    fallback = f"{_CATEGORY_PREFIX.get(category, 'GEN')}_LLM_FINDING"
+    raw = (finding.rule_id or "").strip().upper()
+    if raw in KNOWN_RULE_IDS:
+        return raw if any(c.rule_id == raw for c in candidates) else fallback
+    if _RULE_ID_RE.match(raw):
+        return raw
+    return fallback
 
 
 def _is_grounded(finding: ExpertFinding, files: list[FileDiff]) -> bool:

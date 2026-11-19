@@ -96,10 +96,9 @@ def test_dedupe_keeps_generic_finding_without_rule_hit():
     assert result[0].rule_id == "SEC_LLM_FINDING"
 
 
-def _finding(related: str | None, line: int = 4) -> ExpertFinding:
+def _finding(rule_id: str, line: int = 4) -> ExpertFinding:
     return ExpertFinding(
-        rule_id="SEC_LLM_FINDING",
-        related_rule_id=related,
+        rule_id=rule_id,
         file="app/db.py",
         line=line,
         severity=Severity.P0,
@@ -107,19 +106,22 @@ def _finding(related: str | None, line: int = 4) -> ExpertFinding:
     )
 
 
-def test_declared_link_reuses_candidate_rule_id():
+def test_known_rule_id_reused_when_candidate_hit():
     candidates = [_issue("SEC_SQL_INJECTION", 4, Severity.P0)]
     assert _resolve_rule_id(_finding("SEC_SQL_INJECTION"), "security", candidates) == "SEC_SQL_INJECTION"
 
 
-def test_declared_link_ignored_when_line_differs():
-    candidates = [_issue("SEC_SQL_INJECTION", 5, Severity.P0)]
-    assert _resolve_rule_id(_finding("SEC_SQL_INJECTION"), "security", candidates) == "SEC_LLM_FINDING"
-
-
-def test_declared_link_ignored_when_not_in_candidates():
+def test_known_rule_id_falls_back_when_not_in_candidates():
     candidates = [_issue("PERF_LOOP_IN_QUERY", 4, Severity.P2)]
     assert _resolve_rule_id(_finding("SEC_SQL_INJECTION"), "security", candidates) == "SEC_LLM_FINDING"
+
+
+def test_known_rule_id_falls_back_when_no_candidates():
+    assert _resolve_rule_id(_finding("SEC_SQL_INJECTION"), "security", []) == "SEC_LLM_FINDING"
+
+
+def test_unknown_but_well_formed_rule_id_kept():
+    assert _resolve_rule_id(_finding("SEC_SSRF"), "security", []) == "SEC_SSRF"
 
 
 def test_end_to_end_without_llm():
